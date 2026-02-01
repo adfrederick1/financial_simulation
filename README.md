@@ -38,12 +38,29 @@ Set recurring expenses as percentages of income.
 | **Rent Expense** | Portion of income spent on rent. Automatically stops when you purchase a home |
 | **Savings Rate** | Percentage of income directed to liquid investments each year |
 
-### Charitable Giving (DAF)
+### Charitable Giving
 
-Model a Donor Advised Fund strategy with tax-advantaged giving.
+Model charitable giving with three modes: **Off**, **Annual Gift (Cash)**, or **Donor Advised Fund (DAF)**.
 
 | Field | Description |
 |-------|-------------|
+| **Giving Mode** | Choose between Off (no giving), Annual Gift (direct cash donations), or DAF (Donor Advised Fund) |
+
+#### Annual Gift Mode
+
+Simple direct charitable donations as a percentage of income each year.
+
+| Field | Description |
+|-------|-------------|
+| **Annual Gift** | Percentage of income donated as cash each year (60% AGI deduction limit) |
+
+#### DAF Mode
+
+Model a Donor Advised Fund strategy with tax-advantaged giving of appreciated securities.
+
+| Field | Description |
+|-------|-------------|
+| **Starting DAF Balance** | Existing DAF balance at simulation start (if you already have a DAF) |
 | **DAF Contribution** | Percentage of income contributed to your DAF. Contributions provide immediate tax deductions |
 | **DAF Growth Rate** | Expected investment growth inside the DAF (default 8%) |
 | **Start Donating** | Years after simulation start to begin making grants from the DAF |
@@ -51,7 +68,7 @@ Model a Donor Advised Fund strategy with tax-advantaged giving.
 | **Stable Donation Rate** | Target annual donation rate after transition period (e.g., 5%) |
 | **Transition Period** | Years to ramp up from initial to stable donation rate |
 
-The simulator uses **FIFO (First-In-First-Out)** accounting for donations, meaning oldest lots are donated first. This maximizes the capital gains avoided since older contributions typically have more appreciation.
+The simulator uses **FIFO (First-In-First-Out)** accounting for DAF donations, meaning oldest lots are donated first. This maximizes the capital gains avoided since older contributions typically have more appreciation. DAF contributions of appreciated securities have a 30% AGI deduction limit.
 
 ### Home Purchases
 

@@ -333,13 +333,16 @@ class SimulationEngine {
         const rentPct = (this.scenario.deductions.rentPercent || 0) / 100;
         const savingsPct = (this.scenario.deductions.savingsPercent || 0) / 100;
         
-        // Charitable - contribution to DAF and donation schedule
+        // Charitable - mode determines behavior (off, annual cash gift, or DAF)
+        const charityMode = this.scenario.charitable.mode || 'off';
+        const annualGiftPct = (this.scenario.charitable.annualGiftPercent || 0) / 100;
         const charityContributionPct = (this.scenario.charitable.contributionPercent || 0) / 100;
         const charityGrowthRate = (this.scenario.charitable.growthRate || 8) / 100;
         const donationStartYear = this.scenario.charitable.donationStartYear || 0;
         const initialDonationPct = (this.scenario.charitable.initialDonationPercent || 2) / 100;
         const stableDonationPct = (this.scenario.charitable.stableDonationPercent || 5) / 100;
         const donationTransitionYears = this.scenario.charitable.donationTransitionYears || 5;
+        const dafStartingPrincipal = this.scenario.charitable.startingPrincipal || 0;
         
         // Housing - now supports multiple homes
         const homesConfig = this.scenario.housing?.homes || [];
@@ -375,10 +378,10 @@ class SimulationEngine {
         let liquidAssets = startingSavings;
         let retirementAssets = this.scenario.initialAssets?.retirement || 0;
         
-        // Initialize DAF with FIFO lot tracking
+        // Initialize DAF with FIFO lot tracking (only for DAF mode)
         const dafAccount = new DAFAccount();
-        if (this.scenario.initialAssets?.charitable > 0) {
-            dafAccount.addContribution(startYear - 1, this.scenario.initialAssets.charitable);
+        if (charityMode === 'daf' && dafStartingPrincipal > 0) {
+            dafAccount.addContribution(startYear - 1, dafStartingPrincipal);
         }
         
         // Track if user owns any home (for rent calculation)
@@ -502,39 +505,56 @@ class SimulationEngine {
             const savingsAmount = totalIncome * savingsPct;
             
             // ============================================================
-            // CHARITABLE: Contribution to DAF and Donation from DAF (FIFO)
+            // CHARITABLE: Handles off, annual cash gift, or DAF modes
             // ============================================================
             
-            // Contribution: % of income goes INTO the DAF
-            const charityContribution = totalIncome * charityContributionPct;
-            dafAccount.addContribution(year, charityContribution);
-            
-            // Apply growth to DAF
-            dafAccount.applyGrowth(charityGrowthRate, year);
-            
-            // Donation: Calculate target based on donation schedule (similar to drawdown)
+            let charityContribution = 0;
             let donationRate = 0;
-            let targetDonation = 0;
+            let donation = { fmv: 0, principal: 0, appreciation: 0 };
+            let dafValue = 0;
+            let dafPrincipal = 0;
+            let dafAppreciation = 0;
+            let annualCashGift = 0;
             
-            if (y >= donationStartYear) {
-                const yearsIntoDonation = y - donationStartYear;
-                if (yearsIntoDonation < donationTransitionYears) {
-                    // Linear transition from initial to stable percentage
-                    const progress = yearsIntoDonation / donationTransitionYears;
-                    donationRate = initialDonationPct + (stableDonationPct - initialDonationPct) * progress;
-                } else {
-                    donationRate = stableDonationPct;
+            if (charityMode === 'annual') {
+                // Annual cash gift mode: simple percentage of income donated directly
+                annualCashGift = totalIncome * annualGiftPct;
+                // For tax purposes, treat as a donation with no appreciation (cash)
+                donation = { fmv: annualCashGift, principal: annualCashGift, appreciation: 0 };
+            } else if (charityMode === 'daf') {
+                // DAF mode: contribution to DAF and donation from DAF (FIFO)
+                
+                // Contribution: % of income goes INTO the DAF
+                charityContribution = totalIncome * charityContributionPct;
+                dafAccount.addContribution(year, charityContribution);
+                
+                // Apply growth to DAF
+                dafAccount.applyGrowth(charityGrowthRate, year);
+                
+                // Donation: Calculate target based on donation schedule
+                let targetDonation = 0;
+                
+                if (y >= donationStartYear) {
+                    const yearsIntoDonation = y - donationStartYear;
+                    if (yearsIntoDonation < donationTransitionYears) {
+                        // Linear transition from initial to stable percentage
+                        const progress = yearsIntoDonation / donationTransitionYears;
+                        donationRate = initialDonationPct + (stableDonationPct - initialDonationPct) * progress;
+                    } else {
+                        donationRate = stableDonationPct;
+                    }
+                    // Donation is a percentage of the current DAF value
+                    targetDonation = dafAccount.getTotalValue() * donationRate;
                 }
-                // Donation is a percentage of the current DAF value
-                targetDonation = dafAccount.getTotalValue() * donationRate;
+                
+                donation = dafAccount.donate(targetDonation);
+                
+                // DAF state after donation
+                dafValue = dafAccount.getTotalValue();
+                dafPrincipal = dafAccount.getTotalPrincipal();
+                dafAppreciation = dafAccount.getTotalAppreciation();
             }
-            
-            const donation = dafAccount.donate(targetDonation);
-            
-            // DAF state after donation
-            const dafValue = dafAccount.getTotalValue();
-            const dafPrincipal = dafAccount.getTotalPrincipal();
-            const dafAppreciation = dafAccount.getTotalAppreciation();
+            // else: charityMode === 'off' - all values remain 0
             
             // Large purchases this year
             let purchasesThisYear = 0;
@@ -551,9 +571,12 @@ class SimulationEngine {
             const saltDeduction = ownsAnyHome ? Math.min(totalPropertyTax + 10000, 10000) : 0;
             const mortgageInterestDeduction = totalMortgageInterest;
             
-            // Charitable deduction based on FMV of donation (30% AGI limit for appreciated securities)
-            const agiLimit = totalIncome * TAX_CONFIG.charitableLimits.appreciatedSecurities;
-            const charityDeduction = Math.min(donation.fmv, agiLimit);
+            // Charitable deduction based on FMV of donation
+            // Cash gifts: 60% AGI limit, Appreciated securities: 30% AGI limit
+            const charitableAgiLimit = charityMode === 'annual' 
+                ? totalIncome * TAX_CONFIG.charitableLimits.cash 
+                : totalIncome * TAX_CONFIG.charitableLimits.appreciatedSecurities;
+            const charityDeduction = Math.min(donation.fmv, charitableAgiLimit);
             
             const totalItemized = saltDeduction + mortgageInterestDeduction + charityDeduction;
             const deductionUsed = Math.max(stdDeduction, totalItemized);
@@ -600,7 +623,9 @@ class SimulationEngine {
                 (totalCharitableBenefit / donation.principal) * 100 : 0;
             
             // Discretionary spending (large purchases come from liquid assets, not income)
-            const preCommitted = totalTax + housingCost + savingsAmount + charityContribution;
+            // Include either DAF contributions or annual cash gifts depending on mode
+            const charitableOutflow = charityMode === 'annual' ? annualCashGift : charityContribution;
+            const preCommitted = totalTax + housingCost + savingsAmount + charitableOutflow;
             const discretionaryAmount = totalAvailableCash - preCommitted;
             
             // Update liquid assets
@@ -658,7 +683,10 @@ class SimulationEngine {
                 savingsAmount,
                 
                 // Charitable - detailed
+                charityMode,
                 charityContribution,
+                annualCashGift,
+                charitableOutflow,
                 donationFMV: donation.fmv,
                 donationPrincipal: donation.principal,
                 donationAppreciation: donation.appreciation,
@@ -770,8 +798,39 @@ const PROMPT_DEFINITIONS = [
     },
     {
         id: 'charitable',
-        title: 'Charitable Giving (DAF)',
+        title: 'Charitable Giving',
         fields: [
+            { 
+                id: 'mode', 
+                label: 'Giving Mode', 
+                type: 'select', 
+                default: 'off',
+                options: [
+                    { value: 'off', label: 'Off' },
+                    { value: 'annual', label: 'Cash' },
+                    { value: 'daf', label: 'DAF' }
+                ]
+            },
+            // Annual gift fields
+            { 
+                id: 'annualGiftPercent', 
+                label: 'Annual Gift (% of income)', 
+                type: 'percent', 
+                default: 5, 
+                min: 0, 
+                max: 60,
+                condition: { field: 'mode', value: 'annual' },
+                placeholder: 'Percentage of income donated as cash each year'
+            },
+            // DAF fields
+            { 
+                id: 'startingPrincipal', 
+                label: 'Starting DAF Balance', 
+                type: 'currency', 
+                default: 0,
+                condition: { field: 'mode', value: 'daf' },
+                placeholder: 'Existing DAF balance at simulation start'
+            },
             { 
                 id: 'contributionPercent', 
                 label: 'DAF Contribution (% of income)', 
@@ -779,6 +838,7 @@ const PROMPT_DEFINITIONS = [
                 default: 5, 
                 min: 0, 
                 max: 30,
+                condition: { field: 'mode', value: 'daf' },
                 placeholder: 'Amount going INTO your Donor Advised Fund'
             },
             { 
@@ -788,6 +848,7 @@ const PROMPT_DEFINITIONS = [
                 default: 8, 
                 min: 0, 
                 max: 15,
+                condition: { field: 'mode', value: 'daf' },
                 placeholder: 'Expected investment growth inside DAF'
             },
             { 
@@ -797,6 +858,7 @@ const PROMPT_DEFINITIONS = [
                 default: 2, 
                 min: 0, 
                 max: 40,
+                condition: { field: 'mode', value: 'daf' },
                 placeholder: 'When to begin donating from DAF'
             },
             { 
@@ -807,6 +869,7 @@ const PROMPT_DEFINITIONS = [
                 min: 0, 
                 max: 20,
                 step: 0.5,
+                condition: { field: 'mode', value: 'daf' },
                 placeholder: 'Starting % of DAF to donate annually'
             },
             { 
@@ -817,6 +880,7 @@ const PROMPT_DEFINITIONS = [
                 min: 0, 
                 max: 20,
                 step: 0.5,
+                condition: { field: 'mode', value: 'daf' },
                 placeholder: 'Target annual donation rate'
             },
             { 
@@ -826,6 +890,7 @@ const PROMPT_DEFINITIONS = [
                 default: 5, 
                 min: 1, 
                 max: 20,
+                condition: { field: 'mode', value: 'daf' },
                 placeholder: 'Years to reach stable donation rate'
             }
         ]
@@ -948,6 +1013,9 @@ class ScenarioManager {
                 savingsPercent: 15
             },
             charitable: {
+                mode: 'off',
+                annualGiftPercent: 5,
+                startingPrincipal: 0,
                 contributionPercent: 5,
                 growthRate: 8,
                 donationStartYear: 2,
@@ -1055,8 +1123,16 @@ class PromptUI {
         const data = scenario.data[promptDef.id] || {};
         
         for (const field of promptDef.fields) {
-            // Check condition
-            if (field.condition && !data[field.condition]) continue;
+            // Check condition - supports both simple (boolean) and object-based conditions
+            if (field.condition) {
+                if (typeof field.condition === 'string') {
+                    // Simple condition: check if the field is truthy
+                    if (!data[field.condition]) continue;
+                } else if (typeof field.condition === 'object') {
+                    // Object condition: check if field matches specific value
+                    if (data[field.condition.field] !== field.condition.value) continue;
+                }
+            }
             
             const group = this.createFormGroup(field, data, promptDef.id, scenario);
             if (group) content.appendChild(group);
@@ -1138,6 +1214,47 @@ class PromptUI {
                 scenario.data[promptId][field.id] = isActive;
                 this.onUpdate();
                 this.render();
+            });
+        } else if (field.type === 'select') {
+            const value = data[field.id] ?? field.default;
+            const activeIndex = field.options.findIndex(opt => opt.value === value);
+            const optionsHtml = field.options.map((opt, idx) => 
+                `<div class="segmented-toggle-option${opt.value === value ? ' active' : ''}" data-value="${opt.value}" data-index="${idx}">${opt.label}</div>`
+            ).join('');
+            group.innerHTML = `
+                <label class="form-label">${field.label}</label>
+                <div class="segmented-toggle" data-prompt="${promptId}" data-field="${field.id}">
+                    <div class="segmented-toggle-highlight"></div>
+                    ${optionsHtml}
+                </div>
+            `;
+            
+            const toggle = group.querySelector('.segmented-toggle');
+            const highlight = toggle.querySelector('.segmented-toggle-highlight');
+            const options = toggle.querySelectorAll('.segmented-toggle-option');
+            
+            // Position the highlight on the active option
+            const updateHighlight = () => {
+                const activeOption = toggle.querySelector('.segmented-toggle-option.active');
+                if (activeOption) {
+                    highlight.style.left = activeOption.offsetLeft + 'px';
+                    highlight.style.width = activeOption.offsetWidth + 'px';
+                }
+            };
+            
+            // Initial position (defer to allow DOM to render)
+            requestAnimationFrame(updateHighlight);
+            
+            options.forEach(option => {
+                option.addEventListener('click', () => {
+                    const newValue = option.dataset.value;
+                    options.forEach(o => o.classList.remove('active'));
+                    option.classList.add('active');
+                    updateHighlight();
+                    scenario.data[promptId][field.id] = newValue;
+                    this.onUpdate();
+                    this.render();
+                });
             });
         } else if (field.type === 'purchaseList') {
             const purchases = scenario.data.purchases || [];
@@ -1415,7 +1532,7 @@ class ChartManager {
         this.spendingLines = {
             grossIncome: { visible: true, label: 'Gross Income', color: '#00d4ff', key: 'income' },
             housing: { visible: true, label: 'Housing', color: '#f59e0b', key: 'housingCost' },
-            contributions: { visible: true, label: 'DAF Contributions', color: '#ec4899', key: 'charityContribution' },
+            contributions: { visible: true, label: 'Charitable Giving', color: '#ec4899', key: 'charitableOutflow' },
             donations: { visible: true, label: 'DAF Donations', color: '#a855f7', key: 'donationFMV' },
             taxes: { visible: true, label: 'Taxes', color: '#ef4444', key: 'totalTax' },
             discretionary: { visible: true, label: 'Discretionary (Monthly)', color: '#00ff88', key: 'discretionaryMonthly' }
@@ -2166,8 +2283,9 @@ class ChartManager {
             <div class="tooltip-row"><span class="tooltip-label">Gross Income</span><span class="tooltip-value">${this.formatCurrency(d.income)}</span></div>
             <div class="tooltip-row"><span class="tooltip-label">Housing</span><span class="tooltip-value">${this.formatCurrency(d.housingCost)}</span></div>
             <div class="tooltip-row"><span class="tooltip-label">Taxes</span><span class="tooltip-value">${this.formatCurrency(d.totalTax)}</span></div>
-            <div class="tooltip-row"><span class="tooltip-label">DAF Contribution</span><span class="tooltip-value">${this.formatCurrency(d.charityContribution)}</span></div>
-            <div class="tooltip-row"><span class="tooltip-label">DAF Donation</span><span class="tooltip-value">${this.formatCurrency(d.donationFMV)}</span></div>
+            ${d.charityMode === 'annual' ? `<div class="tooltip-row"><span class="tooltip-label">Annual Gift</span><span class="tooltip-value">${this.formatCurrency(d.annualCashGift)}</span></div>` : ''}
+            ${d.charityMode === 'daf' ? `<div class="tooltip-row"><span class="tooltip-label">DAF Contribution</span><span class="tooltip-value">${this.formatCurrency(d.charityContribution)}</span></div>` : ''}
+            ${d.charityMode === 'daf' ? `<div class="tooltip-row"><span class="tooltip-label">DAF Donation</span><span class="tooltip-value">${this.formatCurrency(d.donationFMV)}</span></div>` : ''}
             <hr style="border-color: var(--border-color); margin: 6px 0;">
             <div class="tooltip-row"><span class="tooltip-label">Discretionary (Monthly)</span><span class="tooltip-value" style="color: #00ff88; font-weight: 600">${this.formatCurrency(d.discretionaryMonthly)}</span></div>
         `;
@@ -2194,10 +2312,11 @@ class ChartManager {
                 <div class="tooltip-row"><span class="tooltip-label">NY State</span><span class="tooltip-value">${this.formatCurrency(d.nyTax)}</span></div>
                 ${d.drawdownCapGainsTax > 0 ? `<div class="tooltip-row"><span class="tooltip-label">Drawdown Cap Gains</span><span class="tooltip-value">${this.formatCurrency(d.drawdownCapGainsTax)}</span></div>` : ''}
                 <hr style="border-color: var(--border-color); margin: 6px 0;">
-                <div class="tooltip-row"><span class="tooltip-label">DAF Contribution</span><span class="tooltip-value">${this.formatCurrency(d.charityContribution)}</span></div>
-                <div class="tooltip-row"><span class="tooltip-label">Donation (${d.donationRate.toFixed(1)}% of DAF)</span><span class="tooltip-value">${this.formatCurrency(d.donationFMV)}</span></div>
+                ${d.charityMode === 'annual' ? `<div class="tooltip-row"><span class="tooltip-label">Annual Gift</span><span class="tooltip-value">${this.formatCurrency(d.annualCashGift)}</span></div>` : ''}
+                ${d.charityMode === 'daf' ? `<div class="tooltip-row"><span class="tooltip-label">DAF Contribution</span><span class="tooltip-value">${this.formatCurrency(d.charityContribution)}</span></div>` : ''}
+                ${d.charityMode === 'daf' ? `<div class="tooltip-row"><span class="tooltip-label">Donation (${d.donationRate.toFixed(1)}% of DAF)</span><span class="tooltip-value">${this.formatCurrency(d.donationFMV)}</span></div>` : ''}
                 <div class="tooltip-row"><span class="tooltip-label">Tax Savings</span><span class="tooltip-value" style="color: #00ff88">${this.formatCurrency(d.charitableTaxSavings)}</span></div>
-                <div class="tooltip-row"><span class="tooltip-label">CG Avoided</span><span class="tooltip-value" style="color: #a855f7">${this.formatCurrency(d.capitalGainsAvoided)}</span></div>
+                ${d.charityMode === 'daf' ? `<div class="tooltip-row"><span class="tooltip-label">CG Avoided</span><span class="tooltip-value" style="color: #a855f7">${this.formatCurrency(d.capitalGainsAvoided)}</span></div>` : ''}
             `;
         } else if (type === 'spending') {
             content += `
