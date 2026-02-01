@@ -4,7 +4,7 @@ A visual financial planning tool to explore different financial futures based on
 
 ## Getting Started
 
-Simply open `index.html` in a web browser. The app runs entirely client-side with no server required.
+Simply open https://adfrederick1.github.io/financial_simulation/ in a web browser.
 
 ## Features
 
